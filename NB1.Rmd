@@ -1,0 +1,1225 @@
+---
+title: "TCC Ciência de Dados - Jurimetria e Séries Temporais"
+output: html_notebook
+---
+
+
+
+# 1. Imports iniciais
+Organização das bibliotecas utilizadas no código
+
+```{r}
+
+# Dados
+library(jurimetrics) # Biblioteca do Professor Zabala contendo os dados do TJRS e o seletor do melhor algoritmo de predição.
+
+# Utilitários R
+library(dplyr) # Fornece a gramática de manipulação dos dados.
+library(tidyr) # Fornece ferramentas para a limpeza de dados.
+library(conflicted) # Utilitário para lidar com conflitos entre bibliotecas.
+library(foreach) # Suporte à iteração de coleções sem declaração formal de loop e construção de listas.
+library(rlang) # Manipulação de tipos básico e código R em tempo de execução. Usado para replicação de objetos.
+library(rlist) # Funções para manipulação de objetos lista. Usado para acrescentar objetos em listas.
+library(Metrics) # Funções de avaliação de erro e demais métricas
+
+# Utilitários Datas
+library(RQuantLib) # Partes da biblioteca QuantLib de finanças quantitativas. Usado consultar calendário para feriados e dias uteis
+library(lubridate) # Utilitário para rápidas operações com datas.
+
+# Gráficos
+library(qcc) #Utilização para o diagrama de Pareto
+
+# Séries temporais
+library(xts) # Provê manipulação uniforme de diferentes tipos de classes de séries temporais em R. Usado para avaliar séries em escalas de tempo diferentes.
+library(timetk) # Manipulação e engenharia de característica em séries temporais. Usado para conversões em tibble onde era exibida normalização.
+library(mFilter) # Implementa vários filtros para séries temporais. Utilziada a função de Hodrick-Prescott para estimar componente cíclico e a tendência de uma série temporal.
+library(tsbox) # Classe utilitária para vários tipos de séries temporais. Usado para simplificar o tipo série temporal.
+library(imputeTS) # Fornece diversos algoritmos para imputação de valores em séries temporais. Utilizado para imputar valores onde havia restrição por divergência no número de observações ou não permitia NAs.
+library(tseries) # Aplicação do teste ADF (Augmented Dickey-Fuller) para verificar estacionariedade da série.
+
+# VAR
+library(vars) #Utilização de vetor autorregressivo (Vector Auto Regressive, ou VAR)
+library(MTS) # Multivariate Time Series aplicação de VAR com lags específicos
+
+#Utilizando conflict para dar preferência a funções da biblioteca dplyr
+conflict_prefer("filter", "dplyr")
+conflict_prefer("select", "dplyr")
+
+#Utilizando conflict para dar preferência a funções da biblioteca vars
+conflict_prefer("VAR", "vars")
+
+#TODOs - Pendências
+# VAR - Vector Auto Regressive X
+# Predição X
+# Paretos X
+# Pairs X
+
+
+```
+
+# 2. Avaliação dos dados
+## 2.1. Demonstração inicial
+```{r}
+
+## Tabela original
+count_year_month_type
+```
+## 2.2. Tratamento de texto do campo "type"
+
+```{r}
+# Chamada de função para conversão de texto
+unescape_unicode <- function(x){
+  #single string only
+  stopifnot(is.character(x) && length(x) == 1)
+
+  #find matches
+  m <- gregexpr("(\\\\)+x[0-9a-z]{2}", x, ignore.case = TRUE)
+
+  if(m[[1]][1] > -1){
+    #parse matches
+    p <- vapply(regmatches(x, m)[[1]], function(txt){
+      gsub("\\", "\\\\", parse(text=paste0('"', txt, '"'))[[1]], fixed = TRUE, useBytes = TRUE)
+    }, character(1), USE.NAMES = FALSE)
+
+    #substitute parsed into original
+    regmatches(x, m) <- list(p)
+  }
+
+  x
+}
+
+# Conversão do texto utf-8 para latin1 por conta da codificação do ambiente windows (Verificar se no linux é o mesmo caso)
+
+# Aplicação em mês-ano
+cymt<-count_year_month_type
+cymt$type<- cymt$type %>% sapply(FUN = unescape_unicode) %>% sapply(iconv, from="UTF-8",to="LATIN1")
+
+#Aplicação por dia
+cdt <- count_day_type
+cdt$type<- cdt$type %>% sapply(FUN = unescape_unicode) %>% sapply(iconv, from="UTF-8",to="LATIN1")
+
+#Aplicação por dia da semana
+cwdt <-count_week_day_type
+cwdt$type<- cwdt$type %>% sapply(FUN = unescape_unicode) %>% sapply(iconv, from="UTF-8",to="LATIN1")
+
+cymt
+```
+
+
+## 2.3. Estrutura
+
+```{r}
+str(cymt, max.level=4)
+```
+
+## 2.4. Valores dos tipos
+```{r rows.print=20}
+cymt %>% group_by(type) %>% summarize(sum(count))
+
+```
+
+
+## 2.5. Inserção de informações sobre feriados e dias da semana nos registros diários
+```{r rows.print=20}
+# Inserindo os dias de semana
+cdt$dow <- wday(cdt$judgmentDate)
+
+# Inserindo a avaliação de dia útil
+cdt$businessday <- cdt$judgmentDate %>% sapply(FUN = strftime, "%u") %>% sapply(FUN = as.numeric) %>% sapply( FUN = (function(x) if(x<6){TRUE}else(FALSE)) )
+# Mesma operação utilizando o RQuantLib
+#cdt$businessday <- cdt$judgmentDate %>% sapply(FUN = isBusinessDay, calendar="Brazil")
+
+# Separando dia, mês e ano para avaliações
+cdt$day<- day(cdt$judgmentDate)
+cdt$month<- month(cdt$judgmentDate)
+cdt$year<- year(cdt$judgmentDate)
+
+# Verificando se a data é feriado
+cdt$holiday <- cdt$judgmentDate %>% sapply(FUN = isHoliday, calendar="Brazil")
+ 
+cdt %>% arrange(judgmentDate)
+
+```
+
+## 2.6. Representação Pareto dos registros
+```{r}
+
+all_cymt <- cymt %>% group_by(type) %>% summarize(sum_count=sum(count)) %>% arrange(desc(sum_count))
+
+## 
+all_cymt_pareto <- all_cymt$sum_count
+names(all_cymt_pareto) <- all_cymt$type
+pareto.chart(all_cymt_pareto)
+
+
+```
+
+
+
+# 3. Análise de dos dados - 5 tipos mais frequentes
+
+## 3.1. Top 5 registros
+```{r}
+top5 <- cymt %>% group_by(type) %>% summarize(sum_count=sum(count)) %>% arrange(desc(sum_count)) %>% top_n(5)
+top5
+
+## Aplicando o filtro top5 para as distribuições de dados
+
+# Observações diárias
+cdt_top5 <- cdt %>% left_join(top5,by = "type") %>% drop_na(sum_count)
+
+# Observações mês e ano
+cymt_top5 <- cymt %>% left_join(top5,by = "type") %>% drop_na(sum_count)
+
+# Observações por dia da semana
+cwdt_top5 <- cwdt %>% left_join(top5,by = "type") %>% drop_na(sum_count)
+ 
+```
+
+
+## 3.2. Quantativo pelo período (Top 5)
+```{r, fig.width=10, fig.height=6}
+# Mudar tons ***
+p <- ggplot(cymt_top5, aes(x=cymt_top5$yearMonth, y=cymt_top5$count, group=cymt_top5$type)) + geom_line(aes(color=cymt_top5$type), lwd=1) + labs(title = "Distribuição Top 5", y="Quantidade",x="Tempo")
+p + scale_color_brewer(palette="Set1") + theme(legend.position="bottom",legend.text = element_text(size=8), axis.title.x=element_blank()) + guides(color=guide_legend(title="Tipo")) 
+
+
+
+```
+
+
+
+```{r, fig.width=10, fig.height=6}
+
+# Avaliação da frequência mensal dos registros
+cdt_freq_month <- cdt_top5 %>% select(type,month,count) %>% group_by(type, month)%>% summarize(sum_count=sum(count)) %>% arrange(desc(sum_count))
+
+ggplot(cdt_freq_month, aes(x=month, y=sum_count, group=type)) + geom_point(size=3,shape=19,aes(color=type),lwd=2) + labs(title = "Distribuição Frequência Meses", y="Quantidade",x="Mês") + scale_x_continuous( breaks=c(1,2,3,4,5,6,7,8,9,10,11,12)) + scale_color_brewer(palette="Set1") + theme(legend.position="bottom",legend.text = element_text(size=8), axis.title.x=element_blank()) + guides(color=guide_legend(title="Tipo")) 
+
+
+```
+
+## 3.3. Verificação de longitude de dados dos top5
+```{r, fig.width=10, fig.height=6}
+cdt_top5_ts <- xts(cdt_top5$count,cdt_top5$judgmentDate, type_name=cdt_top5$type)
+
+
+plot(to.monthly(cdt_top5_ts) )
+plot(to.quarterly(cdt_top5_ts))
+plot(to.yearly(cdt_top5_ts))
+
+
+
+```
+
+
+## 3.4. Demonstração da variação da média e crescimento das 5 séries com mais registros
+```{r, fig.width=10, fig.height=6}
+
+
+# Criando um tibble com a soma e média das contagens anuais
+ysm_tb <- inner_join(tk_tbl(apply.yearly(cdt_top5_ts,FUN=sum)), tk_tbl(apply.yearly(cdt_top5_ts,FUN=mean)), by = "index",suffix = c(".sum", ".mean"))
+
+ysm_tb$norm_sum <- ysm_tb$value.sum %>% scale()
+ysm_tb$norm_mean <- ysm_tb$value.mean %>% scale()
+
+ggplot(ysm_tb, aes(x=index))+geom_line(aes(y = norm_sum,colour = "soma"))+geom_line(aes(y = norm_mean,colour = "média")) + labs(title = "Variação da média e do crescimento ao longo dos anos ", y="Normalizado",x="Anos")
+
+```
+
+
+## 3.5. Avalição e distribuição por Pareto TODO
+```{r}
+#qcc::
+
+# Volume total com quebras x
+# Comparação de modelos (FITS, facebook,...)
+# Pareto (explicar significancia)
+# qcc::pareto.chart(data = cymt_top5$type,plot = TRUE )
+top5_pareto <- top5$sum_count
+names(top5_pareto) <- top5$type
+pareto.chart(top5_pareto)
+
+```
+
+## 3.5. Avaliação da frequencia dos top5 por por dia
+
+* Todos os tipo atingem o máximo de 1000 registros diários
+```{r, fig.width=6, fig.height=6}
+ggplot(cdt_top5, aes(x=judgmentDate, y=count, group=type))+ geom_line(aes(color=type))+ theme(legend.position="bottom",legend.text = element_text(size=5), axis.title.x=element_blank()) + guides(color=guide_legend(title="Tipo"))
+
+#Valor máximo diário
+max(cdt_top5$count)
+
+#Valor máximo para cada top5
+cdt_top5 %>% group_by(type) %>% summarize(max(count))
+
+#Quantidade de dias atingindo o teto de 1000 registros
+cdt_top5 %>% filter(count>999) %>% group_by(type) %>% summarise(qtd=n())
+
+#Dias da semana quando os registros acima de 1000 ocorreram
+cdt_top5 %>% filter(count>999) %>% group_by(dow) %>% summarise(qtd=n())
+
+#Distribuição dos dias excedentes de 1000 por tipo
+cdt_top5 %>% filter(count>999) %>% group_by(type,dow) %>% summarise(qtd=n())
+
+```
+
+## 3.6. Avaliação da frequencia dos top 5 por semana
+```{r, fig.width=6, fig.height=6}
+
+cdt_freq_dow <- cdt_top5 %>% select(type,dow,count) %>% group_by(type, dow)%>% summarize(sum_count=sum(count)) %>% arrange(desc(sum_count))
+
+ggplot(cdt_freq_dow, aes(x=dow, y=sum_count, group=type))+ geom_point(size=3,shape=19,aes(color=type),lwd=2) + labs(title = "Distribuição Frequência Dia da Semana", y="Quantidade",x="Dia da semana")+scale_color_brewer(palette="Set1")
+
+# Pareto com distribuiçao por dia da semana 2x5 (com o geral)
+
+```
+
+## 3.7. Análise de tendência
+
+### 3.7.1. Agregando os registros para visualização de tendência geral
+
+
+```{r, fig.width=15, fig.height=6}
+
+# Agregar o volume de registros
+cymt_top5_agg <- aggregate(x = cymt_top5[c("count")],by=list(Group.yearMonth = cymt_top5$yearMonth),FUN="sum")
+cdt_top5_agg <- aggregate(x = cdt_top5[c("count")],by=list(Group.date = cdt_top5$judgmentDate),FUN="sum")
+
+ggplot(cymt_top5_agg,aes(x=Group.yearMonth))+geom_line(aes(y = count),lwd=1)
+
+```
+
+
+### 3.7.2. Exploração de tendência e componente cíclico do Top5 combinado e por cada tipo (Considerando observações Mês-Ano)
+
+```{r fig.width=10, fig.height=8}
+
+# cdt_top5_ts <- xts(order.by = cymt_top5_agg$Group.yearMonth,cymt_top5_agg$count)
+
+
+cymt_top5_agg.hp <- hpfilter(xts(order.by = cymt_top5_agg$Group.yearMonth,cymt_top5_agg$count),freq=1600)
+
+## Exibição geral
+cymt_top5_agg.hp$xname <- "Top5 Combinado" 
+plot(cymt_top5_agg.hp,ask=F)
+
+#hpfilter(df_count_year_month_type_grp['count'],lamb=1600)
+
+
+# Exibindo as avaliações para cada tipo
+cat("Exibição por tipo")
+list_cymt_top5_hpfo<- foreach(tipo=top5$type) %do% {
+  filtro_tipo <- cymt_top5 %>% filter(type==tipo)
+  
+  hpfo_tipo_cymt <-hpfilter(xts(order.by = filtro_tipo$yearMonth,filtro_tipo$count),freq=1600)
+  hpfo_tipo_cymt$xname <- tipo
+  plot(hpfo_tipo_cymt,ask=F)
+  }
+
+
+
+```
+
+### 3.7.3. Seasonal Decompose - Avaliação Mês-Ano
+
+```{r fig.width=10, fig.height=8}
+
+#sd_cymt_top5_agg <- decompose(ts_ts(xts(order.by = cymt_top5_agg$Group.yearMonth,cymt_top5_agg$count)), type = c("additive", "multiplicative"), filter = NULL)
+#Usando stl para decomposição, segundo recomendação do Hyndman
+sd_cymt_top5_agg <- stl(ts_ts(xts(order.by = cymt_top5_agg$Group.yearMonth,cymt_top5_agg$count)), s.window = 12)
+
+plot(sd_cymt_top5_agg,main = "Decomposição - Top5 Agregado")
+
+
+cat("Exibição por tipo")
+list_stl_ts_cymt_top5_tipo<- foreach(tipo=top5$type) %do% {
+  filtro_tipo <- cymt_top5 %>% filter(type==tipo)
+  
+  #Tratamento de série para limpar NAs
+  ts_filtro_tipo<- ts_ts( xts(order.by = filtro_tipo$yearMonth,filtro_tipo$count))
+  # Imputando NAs através de pesos de média móvel
+  ts_filtro_tipo <- ts_filtro_tipo %>% na_seadec(algorithm = "ma")
+  
+  ##sd_cymt_tipo <-decompose(ts_filtro_tipo, type = c("additive", "multiplicative"), filter = NULL)
+  sd_cymt_tipo <-stl(ts_filtro_tipo, s.window = 12)
+  plot(sd_cymt_tipo,main = paste0("Decomposição - ",tipo))
+  
+  sd_cymt_tipo <- list.append(sd_cymt_tipo,nome=tipo)
+  # Chamada para armazenar as séries decompostas  no vetor resulta e economizar chamadas futuras
+  sd_cymt_tipo
+  }
+
+```
+
+# 4. Avaliações de correlação e sincronia
+
+## Testes - Pearson 
+
+Estou largando o pearson pela argumentação: https://stats.stackexchange.com/questions/133155/how-to-use-pearson-correlation-correctly-with-time-series
+
+```{r fig.width=10, fig.height=8}
+# result_ts_stl_cymt_top5_tipo contem as séries por tipo com a decomposição
+
+# Teste com duas séries quaisquer, pelo componente trend
+# pearson <- cor.test(list_stl_ts_cymt_top5_tipo[[3]]$time.series[,1], list_stl_ts_cymt_top5_tipo[[5]]$time.series[,1], method="pearson" )
+# plot(pearson)
+
+# ggscatter([result_ts_stl_cymt_top5_tipo[[3]]$time.series[,1], result_ts_stl_cymt_top5_tipo[[5]]$time.series[,1]], 
+#           add = "reg.line", conf.int = TRUE, 
+#           cor.coef = TRUE, cor.method = "pearson",
+#           xlab = "tipo 3", ylab = "tipo 5")
+
+# list_pearson <- list()
+# 
+# list_tlcc <- list()
+# 
+# position <- 1
+# for (tipo_top5_ts in list_stl_ts_cymt_top5_tipo) {
+#   # Cria uma cópia da lista de séries removendo a série em questão para comparar com as demais
+#   resto_list <- duplicate(list_stl_ts_cymt_top5_tipo, shallow = FALSE)
+#   resto_list[position]<-NULL
+# 
+#   for(compara in resto_list){
+#     # print(length(tipo_top5_ts$time.series[,1]))
+#     # print(length(compara$time.series[,1]))
+#     #list_pearson<-c(list_pearson, cor.test(tipo_top5_ts$time.series[,1], compara$time.series[,1], method="pearson" ))
+#     corobject<-ccf(tipo_top5_ts$time.series[,2],compara$time.series[,2],type="correlation",plot=FALSE)
+#     corobject$series<-"Trend Mês-Ano"
+#     corobject$snames<-paste(tipo_top5_ts$nome,"x",compara$nome)
+#     list_pearson<- list.append(list_pearson,corobject) 
+#     ggplotly(ggplot(x = corobject$acf, y = corobject$lag ))
+#     # fig <- plot_ly(x = corobject$acf, y = corobject$lag )
+#     # fig
+#   }
+#   position <- position+1
+# }
+
+
+```
+
+## Testes - Time Lagged Cross Correlation
+### * Verificar com o professor como eu poderia descrever
+
+### Avaliação da Janela de Mês-Ano no período todo usando correlação cruzada
+#### Cada top5 avaliado com os outros. 
+```{r fig.width=5, fig.height=4}
+
+list_tlcc <- list()
+
+position <- 1
+for (tipo_top5_ts in list_stl_ts_cymt_top5_tipo) {
+  # Cria uma cópia da lista de séries removendo a série em questão para comparar com as demais
+  resto_list <- duplicate(list_stl_ts_cymt_top5_tipo, shallow = FALSE)
+  resto_list[position]<-NULL
+
+  for(compara in resto_list){
+    # print(length(tipo_top5_ts$time.series[,1]))
+    # print(length(compara$time.series[,1]))
+    #list_pearson<-c(list_pearson, cor.test(tipo_top5_ts$time.series[,1], compara$time.series[,1], method="pearson" ))
+    corobject<-ccf(tipo_top5_ts$time.series[,2],compara$time.series[,2],type="correlation",plot=FALSE)
+    corobject$series<-"Trend Mês-Ano"
+    corobject$snames<-paste(tipo_top5_ts$nome,"x",compara$nome)
+    list_tlcc<- list.append(list_tlcc,corobject) 
+    
+    par(mar=c(3,3,3,3)) #Correção de margens para não ocultar partes do gráfico
+    plot(corobject)
+    # ggplotly(ggplot(x = corobject$acf, y = corobject$lag ))
+    # fig <- plot_ly(x = corobject$acf, y = corobject$lag )
+    # fig
+  }
+  position <- position+1
+}
+
+
+
+# ccf(result_ts_stl_cymt_top5_tipo[[3]]$time.series[,1],result_ts_stl_cymt_top5_tipo[[5]]$time.series[,1],type="correlation")
+```
+
+# Implementação de VAR
+
+## Preparação das séries temporais CYMT (Count Year Month Type) e CDT (Count Day Type) para o VAR
+
+### Preparo CYMT (Count Year Month Type)
+
+Avaliação do VAR na série de Ano Mês
+
+```{r}
+
+#Preparo da série contendo todos os tipos
+
+list_cymt_top5 <- foreach(tipo=top5$type) %do% {
+  filtro_tipo <- cymt_top5 %>% filter(type==tipo)
+  
+  #Tratamento para série temporal
+  ts_filtro_tipo<- ts_ts( xts(order.by = filtro_tipo$yearMonth,filtro_tipo$count))
+}
+
+
+ts_cymt_top5_vars<- list_cymt_top5[[1]] %>% merge.zoo(list_cymt_top5[[2]])
+for (i in 3:5) {
+  ts_cymt_top5_vars<- ts_cymt_top5_vars %>% merge.zoo(list_cymt_top5[[i]]) 
+}
+
+
+
+
+# Imputando NAs através de pesos de interpolação
+ts_cymt_top5_vars<- ts_cymt_top5_vars %>% na_seadec(algorithm = "interpolation")
+colnames(ts_cymt_top5_vars) = top5$type
+plot(ts_cymt_top5_vars,ask=F)
+
+# Dividindo a amostra em treino e teste para validar predições
+# O teste será a proporção ao final, para validar predição de pontos futuros na série (a seleção aleatória não funcionaria)
+# A divisão de treino e teste será pela data limite de Dez/2015 - em torno de 88,88% dos dados (16 anos)
+# Teste conterá os dados a partir de Jan/2016 (2 anos) A ser utilizado para comparar com os resultados de Forecast
+
+# 216 observações de 5 variáveis
+ts_cymt_top5_vars_train<-ts_cymt_top5_vars[0:192,]
+ts_cymt_top5_vars_test<-ts_cymt_top5_vars[193:216,]
+
+tail(ts_cymt_top5_vars_train)
+head(ts_cymt_top5_vars_test)
+
+```
+
+### Preparo CDT (Count Day Type)
+
+Avaliação do VAR na série por dia
+
+```{r}
+list_cdt_top5 <- foreach(tipo=top5$type) %do% {
+  filtro_tipo <- cdt_top5 %>% filter(type==tipo)
+  
+  #Tratamento de série para limpar NAs
+  ts_filtro_tipo<- ts_ts( xts(order.by = filtro_tipo$judgmentDate,filtro_tipo$count))
+  # Imputando NAs através de pesos de interpolação
+  ts_filtro_tipo <- ts_filtro_tipo %>% na_seadec(algorithm = "interpolation")
+  
+
+}
+
+
+ts_cdt_top5_as_vars<- list_cdt_top5[[1]] %>% merge.zoo(list_cdt_top5[[2]],all= TRUE,fill=0)
+for (i in 3:5) {
+  ts_cdt_top5_as_vars<- ts_cdt_top5_as_vars %>% merge.zoo(list_cdt_top5[[i]],all= TRUE,fill=0) 
+}
+
+# Imputando NAs através de pesos de interpolação
+ts_cdt_top5_as_vars<- ts_cdt_top5_as_vars %>% na_seadec(algorithm = "interpolation")
+colnames(ts_cdt_top5_as_vars) = top5$type
+plot(ts_cdt_top5_as_vars,ask=F)
+
+```
+
+
+## Avaliação VAR
+
+### CYMT (Count Year Month Type)
+
+#### Modelo Sem otimização - VAR puro
+```{r}
+
+
+VARselect(ts_cymt_top5_vars_train, lag.max = 6, type = "both", season=6)
+
+VARselect(ts_cymt_top5_vars_train, lag.max = 12, type = "both", season=12)
+
+
+var.cymt.lag12 <- VAR(ts_cymt_top5_vars_train,type = "both",p=12)
+
+summary(var.cymt.lag12 )
+
+```
+
+Modelo AIC Lag 12 Puro em relação à série original e resíduos
+```{r fig.width=8, fig.height=8}
+
+paste0("AIC Lag 12 Puro: ",AIC(var.cymt.lag12))
+plot(var.cymt.lag12, ask=FALSE)
+```
+
+
+
+#### VAR permutações de 1, 3, 6 e 12 meses para lag.máximo e sazonalidade
+
+A sazonalidade foi removida por não melhorar o modelo
+```{r fig.width=10, fig.height=8}
+
+# lagmax - season - AIC - BIC - AIC(restrito) - BIC(restrito) - Objeto VAR - Objeto VAR restrito
+# 1    -  1  - ... 
+# 1    -  6
+# 1    -  12
+# 3,6
+
+# Períodos para teste
+permutas <- c(1,3,6,12)
+
+#Valor delimitante de significância para eliminar parâmetros desnecessários no modelo. 
+threshold.cut = 1.65
+
+# Tibble contendo os valores de tabulados
+tb.var <- tribble(
+  ~lagmax, ~season, ~AIC, ~BIC, ~AIC.restrito, ~BIC.restrito
+)
+#Lista contendo os objetos VAR utilizados
+var.models <- list()
+
+# O parametro de sazonalidade não mostrou significância
+# for (l in permutas) { # l para lag.max
+#   for (s in permutas){ # s para season
+#     
+#     # Verifica se a sazonalidade é 1 para considerar uso do parâmetro, pois gera erro ao executar explicitamente season=1
+#     if (s==1) {
+#       vs <- VARselect(ts_cymt_top5_as_vars, lag.max = l, type = "both")
+#     }else {
+#       vs <- VARselect(ts_cymt_top5_as_vars, lag.max = l, type = "both",season = s)
+#     }
+#     
+#     # Executa o VAR lagmax mais significativo avaliado no VARselect para o tipo AIC
+#     var.l <- VAR(ts_cymt_top5_as_vars,type = "both",p=vs$selection[[1]])
+#     
+#     # Executa a restrição do modelo para manter apenas as variáveis/relações mais significativas
+#     var.l.rest <- restrict(var.l, method = "ser",thresh = threshold.cut)
+#     
+#     # Anota os dados resultantes na tibble
+#     tb.var <- tb.var %>% add_row(lagmax=l, season=s, AIC=AIC(var.l), BIC=BIC(var.l), AIC.restrito=AIC(var.l.rest), BIC.restrito=BIC(var.l.rest))
+#     
+#     # Armazena os modelos utilizados em uma lista
+#     var.models[[paste(paste0("S",s),paste0("L",l),"VAR",sep="_")]]<-var.l
+#     var.models[[paste(paste0("S",s),paste0("L",l),"VARrestrito",sep="_")]]<-var.l.rest
+#   }
+# }
+
+for (l in permutas) { # l para lag.max
+  # Verifica se a sazonalidade é 1 para considerar uso do parâmetro, pois gera erro ao executar explicitamente season=1
+  # if (s==1) {
+    vs <- VARselect(ts_cymt_top5_vars_train, lag.max = l, type = "both")
+  # }else {
+  #   vs <- VARselect(ts_cymt_top5_as_vars, lag.max = l, type = "both",season = s)
+  # }
+  
+  # Executa o VAR lagmax mais significativo avaliado no VARselect para o tipo AIC
+  var.l <- VAR(ts_cymt_top5_vars_train,type = "both",p=vs$selection[[1]])
+  
+  # Executa a restrição do modelo para manter apenas as variáveis/relações mais significativas
+  var.l.rest <- restrict(var.l, method = "ser",thresh = threshold.cut)
+  
+  # Anota os dados resultantes na tibble
+  tb.var <- tb.var %>% add_row(lagmax=l, season=0, AIC=AIC(var.l), BIC=BIC(var.l), AIC.restrito=AIC(var.l.rest), BIC.restrito=BIC(var.l.rest))
+  
+  # Armazena os modelos utilizados em uma lista
+  var.models[[paste(paste0("S",0),paste0("L",l),"VAR",sep="_")]]<-var.l
+  var.models[[paste(paste0("S",0),paste0("L",l),"VARrestrito",sep="_")]]<-var.l.rest
+
+}
+
+
+
+```
+
+
+```{r}
+summary(var.models$S0_L12_VARrestrito)
+
+```
+
+Modelo AIC Lag 12 Var Threshold em relação à série original e resíduos
+```{r fig.width=8, fig.height=8}
+plot(var.models$S0_L12_VARrestrito, ask=FALSE)
+
+```
+
+
+
+#### Modelo VAR utilizando lags especificadas manualmente (handpicked)
+
+##### Tentativa oficial - lags 1,3,6,12
+```{r}
+
+var.cymt.hdp <- VAR(ts_cymt_top5_vars_train,type = "both",p=12)
+# var.cymt12
+
+#Matrix 5 x 62 - lags 1,3,6,12
+
+restrict <- matrix(c(1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,1,
+1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,1,
+1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,1,
+1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,1,
+1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,1),
+                   nrow=5, ncol=62, byrow=TRUE)
+var.cymt.aic.rest.hdp <-restrict(var.cymt.hdp, method = "man", resmat = restrict)
+
+summary(var.cymt.aic.rest.hdp)
+
+AIC(var.cymt.aic.rest.hdp)
+
+```
+
+Modelo Var Handpicked em relação ao original e resíduos
+```{r  fig.width=8, fig.height=8}
+plot(var.cymt.aic.rest.hdp, ask=FALSE)
+```
+
+##### Tentativas handpicked extras - Apenas lags 1,3,6 e 1 e 3
+
+Extra 1 - Lags 1,3 e 6
+```{r}
+
+var.cymt.hdp <- VAR(ts_cymt_top5_vars_train,type = "both",p=12)
+# var.cymt12
+
+#Matrix 5 x 62 - Extra 1 - lags 1,3,6
+
+restrict <- matrix(c(1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,1,
+1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,1,
+1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,1,
+1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,1,
+1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,0,1,0,0,1,0,0,0,0,0,0,1,1),
+                   nrow=5, ncol=62, byrow=TRUE)
+var.cymt.aic.rest.hdp.ex1 <-restrict(var.cymt.hdp, method = "man", resmat = restrict)
+
+summary(var.cymt.aic.rest.hdp)
+
+AIC(var.cymt.aic.rest.hdp)
+
+```
+
+Plot Extra 1
+```{r  fig.width=8, fig.height=8}
+plot(var.cymt.aic.rest.hdp, ask=FALSE)
+```
+
+Extra 2 - Lags 1 e 3
+```{r}
+
+var.cymt.hdp <- VAR(ts_cymt_top5_vars_train,type = "both",p=12)
+# var.cymt12
+
+#Matrix 5 x 62 - Extra 2 - lags 1 e 3
+
+restrict <- matrix(c(1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,1,
+1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,1,
+1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,1,
+1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,1,
+1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,1,1),
+                   nrow=5, ncol=62, byrow=TRUE)
+var.cymt.aic.rest.hdp.ex2 <-restrict(var.cymt.hdp, method = "man", resmat = restrict)
+
+summary(var.cymt.aic.rest.hdp)
+
+AIC(var.cymt.aic.rest.hdp)
+
+```
+
+Plot Extra 2
+```{r  fig.width=8, fig.height=8}
+plot(var.cymt.aic.rest.hdp, ask=FALSE)
+```
+
+
+#### Avaliação dos modelos em relação à própria série disponível
+
+```{r}
+# Função para converter retorno do varpd (Var Predict) em série temporal, para facilitar plot e cálculo de diferenças
+varprd_to_ts <- function(varprd_org,startDate){
+  #Validação das entradas
+  stopifnot(class(varprd_org) == "varprd")
+  stopifnot(class(startDate) == "Date" || class(as.Date(startDate)) == "Date" )
+  
+  #Extrair a lista apenas dos valores previstos
+  lista <- lapply(varprd_org$fcst,'[',,1)
+  
+  #Calculo da data fim baseada no número de observações e data inicial
+  endDate <- ymd(startDate)
+  endDate %m+% months(length(lista$Agravo))
+  
+  #Realiza a conversão de cada item da lista em zooreg, inputando a data inicial e final, com a frequencia indicada em meses
+  list_ts<-lapply(lista,zooreg,start = c(year(startDate),month(startDate)),end=c(year(endDate),month(endDate)),frequency = 12)
+  
+  # Realiza merge.zoo para tranformar a lista de séries em uma única série com diversas variáveis
+  ts_resultado<- list_ts[[1]] %>% merge.zoo(list_ts[[2]])
+  for (i in 3:5) { #Se for usar em outro contexto, trocar o 5 para extensão da lista
+    ts_resultado<- ts_resultado %>% merge.zoo(list_ts[[i]]) 
+  }
+  
+  #Renomear os nomes das variáveis
+  colnames(ts_resultado) = names(lista)
+  #Retorno
+  ts_resultado
+}
+
+
+```
+
+
+Obter os valores previstos e transformar em séries temporais
+
+##### VAR Lag 12 Puro
+
+```{r fig.width=8, fig.height=8}
+
+x_fcast<-predict(var.models$S0_L12_VAR, n.ahead = 24, ci = 0.95, dumvar = NULL)
+
+ts_modelo_varpuro<- varprd_to_ts(x_fcast,"2016-01-01")
+
+# ts_cymt_top5_vars_test
+
+#Apelacao Civel
+
+
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Apelação Cível`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varpuro$Apelação.Cível,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Puro")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Apelacao Civel")
+
+print(p)
+
+
+
+#Agravo de Instrumento
+
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Agravo de Instrumento`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varpuro$Agravo.de.Instrumento,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Puro")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Agravo de Instrumento")
+
+print(p)
+
+#Embargos de Declaração
+
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Embargos de Declaração`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varpuro$Embargos.de.Declaração ,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Puro")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Embargos de Declaração")
+
+print(p)
+
+
+#Recurso Cível
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Recurso Cível`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varpuro$Recurso.Cível ,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Puro")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Recurso Cível")
+
+print(p)
+
+#Agravo
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$Agravo,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varpuro$Agravo ,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Puro")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Agravo")
+
+print(p)
+
+```
+
+##### VAR Threshold
+```{r fig.width=8, fig.height=8}
+
+x_fcast<-predict(var.models$S0_L12_VARrestrito, n.ahead = 24, ci = 0.95, dumvar = NULL)
+
+ts_modelo_varthreshold<- varprd_to_ts(x_fcast,"2016-01-01")
+
+# ts_cymt_top5_vars_test
+
+#Apelacao Civel
+
+
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Apelação Cível`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varthreshold$Apelação.Cível,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Threshold")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Apelacao Civel")
+
+print(p)
+
+
+
+#Agravo de Instrumento
+
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Agravo de Instrumento`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varthreshold$Agravo.de.Instrumento,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Threshold")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Agravo de Instrumento")
+
+print(p)
+
+#Embargos de Declaração
+
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Embargos de Declaração`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varthreshold$Embargos.de.Declaração ,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Threshold")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Embargos de Declaração")
+
+print(p)
+
+
+#Recurso Cível
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Recurso Cível`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varthreshold$Recurso.Cível ,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Threshold")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Recurso Cível")
+
+print(p)
+
+#Agravo
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$Agravo,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varthreshold$Agravo ,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Threshold")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Agravo")
+
+print(p)
+
+
+```
+
+##### VAR Handpicked
+```{r fig.width=8, fig.height=8}
+
+x_fcast<-predict(var.cymt.aic.rest.hdp, n.ahead = 24, ci = 0.95, dumvar = NULL)
+
+ts_modelo_varhdp<- varprd_to_ts(x_fcast,"2016-01-01")
+
+# ts_cymt_top5_vars_test
+
+#Apelacao Civel
+
+
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Apelação Cível`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varhdp$Apelação.Cível,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Handpicked")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Apelacao Civel")
+
+print(p)
+
+
+
+#Agravo de Instrumento
+
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Agravo de Instrumento`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varhdp$Agravo.de.Instrumento,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Handpicked")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Agravo de Instrumento")
+
+print(p)
+
+#Embargos de Declaração
+
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Embargos de Declaração`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varhdp$Embargos.de.Declaração ,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Handpicked")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Embargos de Declaração")
+
+print(p)
+
+
+#Recurso Cível
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$`Recurso Cível`,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varhdp$Recurso.Cível ,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Handpicked")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Recurso Cível")
+
+print(p)
+
+#Agravo
+p = ggplot() + 
+  geom_line(data = timetk::tk_tbl(ts_cymt_top5_vars_test$Agravo,preserve_index=TRUE), aes(x = index, y = value,color="Real")) +
+  geom_line(data = timetk::tk_tbl(ts_modelo_varhdp$Agravo ,preserve_index=TRUE), aes(x = index, y = value,color="Modelo VAR Handpicked")) +
+  xlab('Data') +
+  ylab('Volume') +
+  labs(color="Agravo")
+
+print(p)
+
+```
+# Previsão de Extras 1 e 2 (sem plot comparativo com real)
+```{r}
+
+x_fcast<-predict(var.cymt.aic.rest.hdp.ex1, n.ahead = 24, ci = 0.95, dumvar = NULL)
+
+ts_modelo_varhdp.ex1<- varprd_to_ts(x_fcast,"2016-01-01")
+
+x_fcast<-predict(var.cymt.aic.rest.hdp.ex2, n.ahead = 24, ci = 0.95, dumvar = NULL)
+
+ts_modelo_varhdp.ex2<- varprd_to_ts(x_fcast,"2016-01-01")
+
+```
+
+
+
+Calcular o erro baseado na diferença dos valores gerados em forecast para cada modelo
+
+```{r}
+
+#AIC - R2 - MAE - RMSE - MAPE 
+
+#AIC
+paste0("AIC - Puro: ",AIC(var.models$S0_L12_VAR))
+paste0("AIC - Thresh: ",AIC(var.models$S0_L12_VARrestrito))
+paste0("AIC - Hdpc: ",AIC(var.cymt.aic.rest.hdp))
+
+
+# MAE - Mean Absolute Error 
+paste0("MAE - Puro: ",mae(ts_cymt_top5_vars_test,ts_modelo_varpuro))
+paste0("MAE - thresh: ",mae(ts_cymt_top5_vars_test,ts_modelo_varthreshold))
+paste0("MAE - Hdpc: ",mae(ts_cymt_top5_vars_test,ts_modelo_varhdp))
+
+# RMSE - Root Mean Squared Error
+paste0("RMSE - Puro: ",rmse(ts_cymt_top5_vars_test,ts_modelo_varpuro))
+paste0("RMSE - thresh: ",rmse(ts_cymt_top5_vars_test,ts_modelo_varthreshold))
+paste0("RMSE - Hdpc: ",rmse(ts_cymt_top5_vars_test,ts_modelo_varhdp))
+
+# MAPE - Mean Absolute Percentage Error 
+paste0("MAPE - Puro: ",mape(ts_cymt_top5_vars_test,ts_modelo_varpuro))
+paste0("MAPE - thresh: ",mape(ts_cymt_top5_vars_test,ts_modelo_varthreshold))
+paste0("MAPE - Hdpc: ",mape(ts_cymt_top5_vars_test,ts_modelo_varhdp))
+
+# MASE - Mean Absolute Scaled Error
+paste0("MASE - Puro: ",mase(ts(ts_cymt_top5_vars_test),ts(ts_modelo_varpuro),step_size=12))
+paste0("MASE - thresh: ",mase(ts(ts_cymt_top5_vars_test),ts(ts_modelo_varthreshold),step_size=12))
+paste0("MASE - Hdpc: ",mase(ts(ts_cymt_top5_vars_test),ts(ts_modelo_varhdp),step_size=12))
+
+
+#R2 e ADJUSTED R2 - Separado
+paste0("R²: ",lapply(summary(var.models$S0_L12_VAR)$varresult, "[", "r.squared"))
+paste0("Adjusted R²: ",lapply(summary(var.models$S0_L12_VAR)$varresult, "[", "adj.r.squared"))
+
+paste0("R²: ",lapply(summary(var.models$S0_L12_VARrestrito)$varresult, "[", "r.squared"))
+paste0("Adjusted R²: ",lapply(summary(var.models$S0_L12_VARrestrito)$varresult, "[", "adj.r.squared"))
+
+paste0("R²: ",lapply(summary(var.cymt.aic.rest.hdp)$varresult, "[", "r.squared"))
+paste0("Adjusted R²: ",lapply(summary(var.cymt.aic.rest.hdp)$varresult, "[", "adj.r.squared"))
+
+
+# Tabela de avaliação dos modelos
+tb.eval <- tribble(
+  ~model, ~aic, ~bic, ~mae, ~rmse, ~mape, ~mase
+)
+
+#Puro - Lagmax 12
+tb.eval <- tb.eval %>% add_row(model="VAR - Lag12 - Puro", aic=AIC(var.models$S0_L12_VAR), bic=BIC(var.models$S0_L12_VAR), mae=mae(ts_cymt_top5_vars_test,ts_modelo_varpuro),rmse=rmse(ts_cymt_top5_vars_test,ts_modelo_varpuro),mape=mape(ts_cymt_top5_vars_test,ts_modelo_varpuro),mase=mase(ts(ts_cymt_top5_vars_test),ts(ts_modelo_varpuro),step_size=12))
+
+#Restrito - Lagmax 12 - Threshold p>1.65
+tb.eval <- tb.eval %>% add_row(model=paste0("VAR - Lag 12 - Restrito - Threshold p>",threshold.cut), aic=AIC(var.models$S0_L12_VARrestrito), bic=BIC(var.models$S0_L12_VARrestrito), mae=mae(ts_cymt_top5_vars_test,ts_modelo_varthreshold),rmse=rmse(ts_cymt_top5_vars_test,ts_modelo_varthreshold),mape=mape(ts_cymt_top5_vars_test,ts_modelo_varthreshold),mase=mase(ts(ts_cymt_top5_vars_test),ts(ts_modelo_varthreshold),step_size=12))
+
+#Restrito - Lagmax 12 - Handpicked lags (1,3,6,12)
+tb.eval <- tb.eval %>% add_row(model="VAR - Lag12 - Restrito - Handpicked lags (1,3,6,12)", aic=AIC(var.cymt.aic.rest.hdp), bic=BIC(var.cymt.aic.rest.hdp), mae=mae(ts_cymt_top5_vars_test,ts_modelo_varhdp),rmse=rmse(ts_cymt_top5_vars_test,ts_modelo_varhdp),mape=mape(ts_cymt_top5_vars_test,ts_modelo_varhdp),mase=mase(ts(ts_cymt_top5_vars_test),ts(ts_modelo_varhdp),step_size=12))
+
+#Restrito - Lagmax 12 - Extra 1 - Handpicked lags (1,3,6)
+tb.eval <- tb.eval %>% add_row(model="VAR - Lag12 - Restrito - Extra 1 - Handpicked lags (1,3,6)", aic=AIC(var.cymt.aic.rest.hdp.ex1), bic=BIC(var.cymt.aic.rest.hdp.ex1), mae=mae(ts_cymt_top5_vars_test,ts_modelo_varhdp.ex1),rmse=rmse(ts_cymt_top5_vars_test,ts_modelo_varhdp.ex1),mape=mape(ts_cymt_top5_vars_test,ts_modelo_varhdp.ex1),mase=mase(ts(ts_cymt_top5_vars_test),ts(ts_modelo_varhdp.ex1),step_size=12))
+
+#Restrito - Lagmax 12 - Extra 2 - Handpicked lags (1,3)
+tb.eval <- tb.eval %>% add_row(model="VAR - Lag12 - Restrito - Extra 2 - Handpicked lags (1,3)", aic=AIC(var.cymt.aic.rest.hdp.ex2), bic=BIC(var.cymt.aic.rest.hdp.ex2), mae=mae(ts_cymt_top5_vars_test,ts_modelo_varhdp.ex2),rmse=rmse(ts_cymt_top5_vars_test,ts_modelo_varhdp.ex2),mape=mape(ts_cymt_top5_vars_test,ts_modelo_varhdp.ex2),mase=mase(ts(ts_cymt_top5_vars_test),ts(ts_modelo_varhdp.ex2),step_size=12))
+
+tb.eval
+
+
+# Tabela de R² e R² Ajustado para os modelos
+tb.r2 <- tribble(
+  ~model, ~apelacao.civel.rsq,~apelacao.civel.adj.rsq, ~agravo.de.instrumento.rsq, ~agravo.de.instrumento.adj.rsq, ~embargos.de.declaracao.rsq, ~embargos.de.declaracao.adj.rsq, ~recurso.civel.rsq, ~recurso.civel.adj.rsq, ~agravo.rsq, ~agravo.adj.rsq
+)
+
+# R2 - Puro - Lagmax 12
+r2<-lapply(summary(var.models$S0_L12_VAR)$varresult, "[", "r.squared")
+r2.adj<-lapply(summary(var.models$S0_L12_VAR)$varresult, "[", "adj.r.squared")
+
+tb.r2 <- tb.r2 %>% add_row(model="VAR - Lag12 - Puro",apelacao.civel.rsq=r2$Apelação.Cível$r.squared, apelacao.civel.adj.rsq= r2.adj$Apelação.Cível$adj.r.squared, agravo.de.instrumento.rsq=r2$Agravo.de.Instrumento$r.squared, agravo.de.instrumento.adj.rsq=r2.adj$Agravo.de.Instrumento$adj.r.squared, embargos.de.declaracao.rsq=r2$Embargos.de.Declaração$r.squared, embargos.de.declaracao.adj.rsq=r2.adj$Embargos.de.Declaração$adj.r.squared, recurso.civel.rsq=r2$Recurso.Cível$r.squared, recurso.civel.adj.rsq=r2.adj$Recurso.Cível$adj.r.squared, agravo.rsq=r2$Agravo$r.squared, agravo.adj.rsq=r2.adj$Agravo$adj.r.squared )
+
+# R2 - Restrito - Lagmax 12 - Threshold
+r2<-lapply(summary(var.models$S0_L12_VARrestrito)$varresult, "[", "r.squared")
+r2.adj<-lapply(summary(var.models$S0_L12_VARrestrito)$varresult, "[", "adj.r.squared")
+
+tb.r2 <- tb.r2 %>% add_row(model=paste0("VAR - Lag12 - Restrito - p>",threshold.cut),apelacao.civel.rsq=r2$Apelação.Cível$r.squared, apelacao.civel.adj.rsq= r2.adj$Apelação.Cível$adj.r.squared, agravo.de.instrumento.rsq=r2$Agravo.de.Instrumento$r.squared, agravo.de.instrumento.adj.rsq=r2.adj$Agravo.de.Instrumento$adj.r.squared, embargos.de.declaracao.rsq=r2$Embargos.de.Declaração$r.squared, embargos.de.declaracao.adj.rsq=r2.adj$Embargos.de.Declaração$adj.r.squared, recurso.civel.rsq=r2$Recurso.Cível$r.squared, recurso.civel.adj.rsq=r2.adj$Recurso.Cível$adj.r.squared, agravo.rsq=r2$Agravo$r.squared, agravo.adj.rsq=r2.adj$Agravo$adj.r.squared )
+
+# R2 - Restrito - Lagmax 12 - Handpicked lags (1,3,6,12)
+r2<-lapply(summary(var.cymt.aic.rest.hdp)$varresult, "[", "r.squared")
+r2.adj<-lapply(summary(var.cymt.aic.rest.hdp)$varresult, "[", "adj.r.squared")
+
+tb.r2 <- tb.r2 %>% add_row(model="VAR - Lag12 - Handpicked lags (1,3,6,12)",apelacao.civel.rsq=r2$Apelação.Cível$r.squared, apelacao.civel.adj.rsq= r2.adj$Apelação.Cível$adj.r.squared, agravo.de.instrumento.rsq=r2$Agravo.de.Instrumento$r.squared, agravo.de.instrumento.adj.rsq=r2.adj$Agravo.de.Instrumento$adj.r.squared, embargos.de.declaracao.rsq=r2$Embargos.de.Declaração$r.squared, embargos.de.declaracao.adj.rsq=r2.adj$Embargos.de.Declaração$adj.r.squared, recurso.civel.rsq=r2$Recurso.Cível$r.squared, recurso.civel.adj.rsq=r2.adj$Recurso.Cível$adj.r.squared, agravo.rsq=r2$Agravo$r.squared, agravo.adj.rsq=r2.adj$Agravo$adj.r.squared )
+
+# R2 - Restrito - Lagmax 12 - Extra 1 - Handpicked lags (1,3,6)
+r2<-lapply(summary(var.cymt.aic.rest.hdp.ex1)$varresult, "[", "r.squared")
+r2.adj<-lapply(summary(var.cymt.aic.rest.hdp.ex1)$varresult, "[", "adj.r.squared")
+
+tb.r2 <- tb.r2 %>% add_row(model="VAR - Lag12 - Extra 1 - Handpicked lags (1,3,6)",apelacao.civel.rsq=r2$Apelação.Cível$r.squared, apelacao.civel.adj.rsq= r2.adj$Apelação.Cível$adj.r.squared, agravo.de.instrumento.rsq=r2$Agravo.de.Instrumento$r.squared, agravo.de.instrumento.adj.rsq=r2.adj$Agravo.de.Instrumento$adj.r.squared, embargos.de.declaracao.rsq=r2$Embargos.de.Declaração$r.squared, embargos.de.declaracao.adj.rsq=r2.adj$Embargos.de.Declaração$adj.r.squared, recurso.civel.rsq=r2$Recurso.Cível$r.squared, recurso.civel.adj.rsq=r2.adj$Recurso.Cível$adj.r.squared, agravo.rsq=r2$Agravo$r.squared, agravo.adj.rsq=r2.adj$Agravo$adj.r.squared )
+
+# R2 - Restrito - Lagmax 12 - Extra 2 - Handpicked lags (1,3)
+r2<-lapply(summary(var.cymt.aic.rest.hdp.ex2)$varresult, "[", "r.squared")
+r2.adj<-lapply(summary(var.cymt.aic.rest.hdp.ex2)$varresult, "[", "adj.r.squared")
+
+tb.r2 <- tb.r2 %>% add_row(model="VAR - Lag12 - Extra 2 - Handpicked lags (1,3)",apelacao.civel.rsq=r2$Apelação.Cível$r.squared, apelacao.civel.adj.rsq= r2.adj$Apelação.Cível$adj.r.squared, agravo.de.instrumento.rsq=r2$Agravo.de.Instrumento$r.squared, agravo.de.instrumento.adj.rsq=r2.adj$Agravo.de.Instrumento$adj.r.squared, embargos.de.declaracao.rsq=r2$Embargos.de.Declaração$r.squared, embargos.de.declaracao.adj.rsq=r2.adj$Embargos.de.Declaração$adj.r.squared, recurso.civel.rsq=r2$Recurso.Cível$r.squared, recurso.civel.adj.rsq=r2.adj$Recurso.Cível$adj.r.squared, agravo.rsq=r2$Agravo$r.squared, agravo.adj.rsq=r2.adj$Agravo$adj.r.squared )
+
+
+# Exibir tabela de R² e R² ajustado
+tb.r2
+
+```
+
+
+### Impulso (Não considerar)
+```{r}
+
+# Gráficos de reposta de impulso
+
+ir.1 <- irf(var.models$S0_L12_VARrestrito, impulse = "Agravo", response = "Recurso.Cível", n.ahead = 20, ortho = FALSE)
+plot(ir.1)
+
+ir.2 <- irf(var.models$S0_L12_VARrestrito, impulse = "Apelação.Cível", response = "Recurso.Cível", n.ahead = 20, ortho = FALSE)
+plot(ir.2)
+
+ir.3 <- irf(var.models$S0_L12_VARrestrito,impulse="Apelação.Cível",response="Recurso.Cível",n.ahead = 20,ortho = FALSE,cumulative = TRUE)
+plot(ir.3)
+
+```
+
+
+### CDT (Count Day Type)
+
+```{r}
+# var.cdt <- VAR(ts_cdt_top5_as_vars,type = "none") 
+# var.cdt
+# 
+# VARselect(ts_cdt_top5_as_vars, lag.max = 10, type = "both", season=7)
+```
+```{r}
+# var.cdt.aic <- VAR(ts_cdt_top5_as_vars, type = "none", lag.max = 10, ic = "SC")
+# summary(var.cdt.aic)
+```
+
+
+
+# Partes sugeridas pelo professor
+
+## Pairs Mês Ano
+```{r}
+pairs(ts_cymt_top5_vars)
+```
+
+## Pairs Diário
+```{r}
+# pairs para top5
+pairs(ts_cdt_top5_as_vars)
+
+
+
+```
+
+
+## Avaliação de algoritmos de predição
+Previsão aplicada à serie agregada do top5 (soma cumulativa das 3 séries) em Ano-Mês
+```{r}
+ts_cymt_top5_agg<- ts_ts(cymt_top5_agg)
+
+#jurimetrics::fits(ts_ts(cymt_top5_agg), train = 0.9, steps = 4)
+#Não sei pq o fits não funciona se consigo executar as avaliações separadamente -> mse.pred resulta em NA para todos então a variável bestModel fica sem atribuição
+
+i <- ceiling(0.8*length(ts_cymt_top5_agg))
+
+#Autoarima
+fit.aa <- forecast::auto.arima(ts_cymt_top5_agg[1:i], seasonal = TRUE, seasonal.test="seas", ic="aic", allowdrift=FALSE,stepwise = FALSE, nmodels=300)
+fcast.aa <- forecast::forecast(fit.aa, h=24)
+plot(fcast.aa)
+
+#Exponential Smoothing
+fit.ets <- forecast::ets(ts_cymt_top5_agg[1:i])
+fcast.ets <- forecast::forecast(fit.ets, h=24)
+plot(fcast.ets)
+
+# TBATS
+# T for trigonometric regressors to model multiple-seasonalities
+# B for Box-Cox transformations
+# A for ARMA errors
+# T for trend
+# S for seasonality
+fit.tb <- forecast::tbats(ts_cymt_top5_agg[1:i])
+fcast.tb <- forecast::forecast(fit.tb, h=24)
+plot(fcast.tb)
+
+#Neural Network Auto Regressive - NNETAR
+set.seed(1); 
+fit.nn <- forecast::nnetar(ts_cymt_top5_agg[1:i])
+fcast.nn <- forecast::forecast(fit.nn, h=24, PI = F)
+plot(fcast.nn)
+
+```
+
+
+```{r}
+adf.test(x=ts_cymt_top5_agg)
+```
+
+
+
+# Referências
+```{r}
+# Comentado por enquanto para economizar espaço
+citation("jurimetrics") 
+citation("dplyr") 
+citation("tidyr") 
+citation("conflicted") 
+citation("foreach") 
+citation("rlang") 
+citation("rlist") 
+citation("Metrics") 
+citation("RQuantLib") 
+citation("lubridate") 
+citation("qcc") 
+citation("xts") 
+citation("timetk") 
+citation("mFilter") 
+citation("tsbox") 
+citation("imputeTS") 
+citation("tseries") 
+citation("vars") 
+citation("MTS")
+
+```
+
+
+
+VAR - BIC - AIC - Lags significativos
+lags,season 1,1 
+3,6
+
+
+
+- Lags handpicked 1,3,6,12
+- Interpretar os coeficientes significativos (estimates...)
+- Fazer a predição (forecast)
+- Comparar projeção com o último ano
+- Explicar o modelo com as projeções anteriores
+
+
+Estimate -> Diferença em relação 0
+Std. Error -> Erro padrão
+t value -> Estimate/Std. Error
+Pr(>|t|) -> Percentual de t ao infinito

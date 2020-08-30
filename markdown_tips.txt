@@ -1,0 +1,14 @@
+RMD Tips
+
+
+Link R Markdown-> [R Markdown](http://rmarkdown.rstudio.com)
+
+Run chunk -> Ctrl + Shift + Enter
+
+Add new chunk -> Ctrl + Shift + I
+
+Preview notebook -> Ctrl + Shift + K
+
+preview shows you a rendered HTML copy of the contents of the editor.
+The output of the chunk when it was last run in the editor is displayed.
+Consequently, unlike *Knit*, *Preview* does not run any R code chunks.
